@@ -8,7 +8,26 @@ let browser: Browser | undefined;
 let page: Page | undefined;
 
 export async function ensureBrowser(): Promise<Page> {
-  if (!browser) {
+  try {
+    // Check if existing browser is still connected
+    if (browser && browser.isConnected() && page && !page.isClosed()) {
+      logger.debug('Reusing existing browser and page');
+      return page;
+    }
+
+    // Close any existing disconnected browser
+    if (browser && !browser.isConnected()) {
+      logger.debug('Cleaning up disconnected browser');
+      try {
+        await browser.close();
+      } catch (e) {
+        logger.debug('Error closing disconnected browser:', e);
+      }
+      browser = undefined;
+      page = undefined;
+    }
+
+    // Launch new browser
     logger.info('Launching browser with config:', process.env.DOCKER_CONTAINER ? 'docker' : 'npx');
     browser = await puppeteer.launch(process.env.DOCKER_CONTAINER ? dockerConfig : npxConfig);
     const pages = await browser.pages();
@@ -16,13 +35,19 @@ export async function ensureBrowser(): Promise<Page> {
 
     // Set default navigation timeout
     await page.setDefaultNavigationTimeout(DEFAULT_NAVIGATION_TIMEOUT);
-    
+
     // Enable JavaScript
     await page.setJavaScriptEnabled(true);
-    
+
     logger.info('Browser launched successfully');
+    return page;
+  } catch (error) {
+    logger.error('Failed to ensure browser:', error);
+    // Reset state on error
+    browser = undefined;
+    page = undefined;
+    throw error;
   }
-  return page!;
 }
 
 export async function getDebuggerWebSocketUrl(port: number = 9222): Promise<string> {

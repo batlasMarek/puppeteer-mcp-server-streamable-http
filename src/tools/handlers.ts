@@ -1,23 +1,26 @@
 import { CallToolResult, TextContent, ImageContent } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "../config/logger.js";
 import { BrowserState } from "../types/global.js";
-import { 
-  ensureBrowser, 
-  getDebuggerWebSocketUrl, 
+import {
+  ensureBrowser,
+  getDebuggerWebSocketUrl,
   connectToExistingBrowser,
-  getCurrentPage 
+  getCurrentPage
 } from "../browser/connection.js";
 import { notifyConsoleUpdate, notifyScreenshotUpdate } from "../resources/handlers.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { saveScreenshotToDisk, sanitizeFilename } from "../utils/screenshots.js";
 
 export async function handleToolCall(
-  name: string, 
-  args: any, 
+  name: string,
+  args: any,
   state: BrowserState,
   server: Server
 ): Promise<CallToolResult> {
   logger.debug('Tool call received', { tool: name, arguments: args });
-  const page = await ensureBrowser();
+
+  try {
+    const page = await ensureBrowser();
 
   switch (name) {
     case "puppeteer_connect_active_tab":
@@ -119,14 +122,31 @@ export async function handleToolCall(
         };
       }
 
+      // Store in memory for MCP resource access
       state.screenshots.set(args.name, screenshot);
       notifyScreenshotUpdate(server);
+
+      // Save to disk
+      let savedFilePath = "";
+      try {
+        const safeName = sanitizeFilename(args.name);
+        savedFilePath = await saveScreenshotToDisk(safeName, screenshot);
+      } catch (error) {
+        logger.warn('Failed to save screenshot to disk, continuing with in-memory storage', {
+          name: args.name,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+
+      const responseText = savedFilePath ?
+        `Screenshot '${args.name}' taken at ${width}x${height} and saved to: ${savedFilePath}` :
+        `Screenshot '${args.name}' taken at ${width}x${height} (saved to memory only)`;
 
       return {
         content: [
           {
             type: "text",
-            text: `Screenshot '${args.name}' taken at ${width}x${height}`,
+            text: responseText,
           } as TextContent,
           {
             type: "image",
@@ -280,5 +300,24 @@ export async function handleToolCall(
         }],
         isError: true,
       };
+  }
+  } catch (error) {
+    logger.error('Tool execution failed', { tool: name, error: error instanceof Error ? error.message : String(error) });
+
+    // Check if it's a browser connection error
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isBrowserError = errorMessage.includes('Session closed') ||
+                          errorMessage.includes('Target closed') ||
+                          errorMessage.includes('Protocol error');
+
+    return {
+      content: [{
+        type: "text",
+        text: isBrowserError ?
+          `Browser session error for ${name}: ${errorMessage}. The browser may have been closed. Please try reconnecting or restarting the browser.` :
+          `Tool execution failed for ${name}: ${errorMessage}`,
+      }],
+      isError: true,
+    };
   }
 }
